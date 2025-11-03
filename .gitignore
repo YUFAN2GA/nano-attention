@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Model outputs
+*.pth
+*.pt
+checkpoints/
+
+# Visualizations
+*.png
+*.jpg
+plots/
+
+# Logs
+*.log
+llm-log.txt
+
+# OS
+.DS_Store
+Thumbs.db
