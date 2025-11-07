@@ -58,18 +58,60 @@ def train_model(num_epochs=200, batch_size=4, learning_rate=0.001, device='cpu')
             input_tokens = input_tokens.to(device)
             target_tokens = target_tokens.to(device)
 
+            # 是否记录详细日志（仅第1个epoch的第1个batch）
+            log_details = (epoch == 0 and batch_idx == 0)
+
+            if log_details:
+                logger.section("═════ 第1个Epoch 第1个Batch 的详细计算过程 ═════")
+                logger.info(f"Batch大小: {input_tokens.shape[0]}, 序列长度: {input_tokens.shape[1]}")
+                logger.info(f"输入token IDs:\n{input_tokens.cpu().numpy()}")
+                logger.info(f"目标token IDs:\n{target_tokens.cpu().numpy()}")
+
             # 前向传播
             optimizer.zero_grad()
-            output = model(input_tokens)  # [batch_size, seq_len, vocab_size]
+            output = model(input_tokens, log_details=log_details)  # [batch_size, seq_len, vocab_size]
 
             # 计算损失
             # 将output展平: [batch_size * seq_len, vocab_size]
             # 将target展平: [batch_size * seq_len]
             loss = criterion(output.view(-1, dataset.vocab_size), target_tokens.view(-1))
 
+            if log_details:
+                logger.subsection("损失计算")
+                logger.debug(f"损失值: {loss.item():.6f}")
+                logger.debug(f"Output logits (第1个样本，第1个位置的前5个类别): {output[0, 0, :5].detach().cpu().numpy()}")
+
+                # 显示第一个位置的预测概率
+                probs = torch.softmax(output[0, 0], dim=-1)
+                top5_probs, top5_indices = torch.topk(probs, k=5)
+                logger.debug(f"第1个样本，第1个位置的预测概率 Top5:")
+                for i in range(5):
+                    word = dataset.idx_to_word[top5_indices[i].item()]
+                    prob = top5_probs[i].item()
+                    logger.debug(f"  {i+1}. '{word}' (ID={top5_indices[i].item()}): {prob:.4f}")
+
             # 反向传播
             loss.backward()
+
+            if log_details:
+                logger.subsection("梯度统计")
+                # 记录各层的梯度
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        grad_mean = param.grad.mean().item()
+                        grad_std = param.grad.std().item()
+                        grad_max = param.grad.max().item()
+                        grad_min = param.grad.min().item()
+                        logger.debug(f"{name}:")
+                        logger.debug(f"  形状: {list(param.grad.shape)}")
+                        logger.debug(f"  梯度: 均值={grad_mean:.6f}, 标准差={grad_std:.6f}, 范围=[{grad_min:.6f}, {grad_max:.6f}]")
+
             optimizer.step()
+
+            if log_details:
+                logger.subsection("参数更新后统计")
+                logger.debug(f"Embedding权重统计: 范围=[{model.embedding.weight.min():.4f}, {model.embedding.weight.max():.4f}], 均值={model.embedding.weight.mean():.4f}")
+                logger.section("═════ 详细计算过程结束 ═════")
 
             total_loss += loss.item()
             num_batches += 1

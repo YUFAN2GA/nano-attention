@@ -52,15 +52,23 @@ class MultiHeadAttention(nn.Module):
         # 保存最后一次的注意力权重用于可视化
         self.last_attention_weights = None
 
-    def forward(self, query, key, value, mask=None):
+    def forward(self, query, key, value, mask=None, log_details=False, layer_name=""):
         """
         Args:
             query, key, value: [batch_size, seq_len, d_model]
             mask: [batch_size, seq_len, seq_len] or [seq_len, seq_len]
+            log_details: 是否记录详细日志
+            layer_name: 层名称（用于日志）
         Returns:
             output: [batch_size, seq_len, d_model]
         """
+        logger = get_logger() if log_details else None
         batch_size = query.size(0)
+        seq_len = query.size(1)
+
+        if log_details:
+            logger.debug(f"{layer_name} - 输入形状: query={query.shape}, key={key.shape}, value={value.shape}")
+            logger.debug(f"{layer_name} - 输入统计: query范围=[{query.min():.4f}, {query.max():.4f}], 均值={query.mean():.4f}")
 
         # 线性变换并分成多个头
         # [batch_size, seq_len, d_model] -> [batch_size, seq_len, num_heads, d_k]
@@ -68,16 +76,56 @@ class MultiHeadAttention(nn.Module):
         K = self.W_k(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         V = self.W_v(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
 
+        if log_details:
+            logger.debug(f"{layer_name} - QKV变换后形状: Q={Q.shape}, K={K.shape}, V={V.shape}")
+            logger.debug(f"{layer_name} - Q统计: 范围=[{Q.min():.4f}, {Q.max():.4f}], 均值={Q.mean():.4f}, 标准差={Q.std():.4f}")
+            logger.debug(f"{layer_name} - K统计: 范围=[{K.min():.4f}, {K.max():.4f}], 均值={K.mean():.4f}, 标准差={K.std():.4f}")
+            logger.debug(f"{layer_name} - V统计: 范围=[{V.min():.4f}, {V.max():.4f}], 均值={V.mean():.4f}, 标准差={V.std():.4f}")
+
+            # 显示第一个头的Q矩阵的一部分
+            if seq_len <= 10:
+                logger.debug(f"{layer_name} - Head 0 的 Q 矩阵 (前3个token, 前5维):")
+                for i in range(min(3, seq_len)):
+                    logger.debug(f"      Token {i}: {Q[0, 0, i, :5].detach().cpu().numpy()}")
+
         # 计算注意力分数
         # [batch_size, num_heads, seq_len, seq_len]
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
+        if log_details:
+            logger.debug(f"{layer_name} - 注意力分数 (缩放前) 形状: {scores.shape}")
+            logger.debug(f"{layer_name} - 注意力分数统计: 范围=[{scores.min():.4f}, {scores.max():.4f}], 均值={scores.mean():.4f}")
+            logger.debug(f"{layer_name} - 缩放因子 sqrt(d_k) = sqrt({self.d_k}) = {math.sqrt(self.d_k):.4f}")
+
+            if seq_len <= 10:
+                logger.debug(f"{layer_name} - Head 0 的注意力分数矩阵 (mask前):")
+                score_matrix = scores[0, 0].detach().cpu().numpy()
+                for i in range(seq_len):
+                    row_str = "      " + " ".join([f"{score_matrix[i,j]:6.2f}" for j in range(seq_len)])
+                    logger.debug(row_str)
+
         # 应用mask（用于防止看到未来的词）
         if mask is not None:
             scores = scores.masked_fill(mask == 0, -1e9)
+            if log_details and seq_len <= 10:
+                logger.debug(f"{layer_name} - Head 0 的注意力分数矩阵 (mask后):")
+                score_matrix = scores[0, 0].detach().cpu().numpy()
+                for i in range(seq_len):
+                    row_str = "      " + " ".join([f"{score_matrix[i,j]:6.2f}" if score_matrix[i,j] > -1e8 else "  -inf" for j in range(seq_len)])
+                    logger.debug(row_str)
 
         # Softmax得到注意力权重
         attention_weights = F.softmax(scores, dim=-1)
+
+        if log_details:
+            logger.debug(f"{layer_name} - 注意力权重 (softmax后) 统计: 范围=[{attention_weights.min():.4f}, {attention_weights.max():.4f}]")
+            if seq_len <= 10:
+                logger.debug(f"{layer_name} - Head 0 的注意力权重矩阵 (每行和=1.0):")
+                attn_matrix = attention_weights[0, 0].detach().cpu().numpy()
+                for i in range(seq_len):
+                    row_str = "      " + " ".join([f"{attn_matrix[i,j]:6.4f}" for j in range(seq_len)])
+                    row_sum = attn_matrix[i].sum()
+                    logger.debug(f"{row_str}  (和={row_sum:.4f})")
 
         # 保存注意力权重用于可视化
         self.last_attention_weights = attention_weights.detach()
@@ -86,12 +134,19 @@ class MultiHeadAttention(nn.Module):
         # [batch_size, num_heads, seq_len, d_k]
         output = torch.matmul(attention_weights, V)
 
+        if log_details:
+            logger.debug(f"{layer_name} - 注意力加权后的输出统计: 范围=[{output.min():.4f}, {output.max():.4f}], 均值={output.mean():.4f}")
+
         # 合并多头
         # [batch_size, seq_len, d_model]
         output = output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
 
         # 最后的线性变换
         output = self.W_o(output)
+
+        if log_details:
+            logger.debug(f"{layer_name} - 最终输出形状: {output.shape}")
+            logger.debug(f"{layer_name} - 最终输出统计: 范围=[{output.min():.4f}, {output.max():.4f}], 均值={output.mean():.4f}")
 
         return output
 
@@ -119,9 +174,9 @@ class TransformerBlock(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, log_details=False, layer_name=""):
         # 自注意力 + 残差连接 + 层归一化
-        attention_output = self.attention(x, x, x, mask)
+        attention_output = self.attention(x, x, x, mask, log_details=log_details, layer_name=f"{layer_name}_Attention")
         x = self.norm1(x + self.dropout(attention_output))
 
         # 前馈网络 + 残差连接 + 层归一化
@@ -179,14 +234,20 @@ class NanoTransformer(nn.Module):
         mask = torch.tril(torch.ones(seq_len, seq_len))
         return mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
 
-    def forward(self, x):
+    def forward(self, x, log_details=False):
         """
         Args:
             x: [batch_size, seq_len] - 输入的token索引
+            log_details: 是否记录详细日志
         Returns:
             output: [batch_size, seq_len, vocab_size] - 每个位置的词概率分布
         """
+        logger = get_logger() if log_details else None
         seq_len = x.size(1)
+
+        if log_details:
+            logger.subsection("详细前向传播过程")
+            logger.debug(f"输入token ID: {x[0].detach().cpu().numpy()}")
 
         # 创建因果mask
         mask = self.create_causal_mask(seq_len).to(x.device)
@@ -194,16 +255,32 @@ class NanoTransformer(nn.Module):
         # 词嵌入 * sqrt(d_model) （按照原始论文）
         x = self.embedding(x) * math.sqrt(self.d_model)
 
+        if log_details:
+            logger.debug(f"Embedding后形状: {x.shape}")
+            logger.debug(f"Embedding统计: 范围=[{x.min():.4f}, {x.max():.4f}], 均值={x.mean():.4f}")
+            logger.debug(f"缩放因子 sqrt(d_model) = {math.sqrt(self.d_model):.4f}")
+
         # 添加位置编码
         x = self.pos_encoding(x)
         x = self.dropout(x)
 
+        if log_details:
+            logger.debug(f"位置编码后统计: 范围=[{x.min():.4f}, {x.max():.4f}], 均值={x.mean():.4f}")
+
         # 通过Transformer块
-        for transformer_block in self.transformer_blocks:
-            x = transformer_block(x, mask)
+        for idx, transformer_block in enumerate(self.transformer_blocks):
+            if log_details:
+                logger.subsection(f"Transformer Layer {idx+1}")
+            x = transformer_block(x, mask, log_details=log_details, layer_name=f"Layer{idx+1}")
+            if log_details:
+                logger.debug(f"Layer {idx+1} 输出统计: 范围=[{x.min():.4f}, {x.max():.4f}], 均值={x.mean():.4f}")
 
         # 输出层
         output = self.fc_out(x)
+
+        if log_details:
+            logger.debug(f"最终输出logits形状: {output.shape}")
+            logger.debug(f"最终输出logits统计: 范围=[{output.min():.4f}, {output.max():.4f}], 均值={output.mean():.4f}")
 
         return output
 
